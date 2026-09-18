@@ -211,13 +211,16 @@ function createCatalogGuard() {
 // The payment threshold is configured through Meta's own billing dialog.
 // No undocumented write endpoint, spend_cap, or card spending limit is used.
 function createPaymentThresholdTools(env) {
-  const norm = s => String(s || '').replace(/[’‘]/g, "'").replace(/\s+/g, ' ').trim();
+  const norm = s => String(s || '').replace(/[’‘ʼ]/g, "'").replace(/[\u200b-\u200f\u2066-\u2069]/g, '').replace(/\s+/g, ' ').trim();
   const textOf = el => norm(typeof el.innerText === 'string' ? el.innerText : el.textContent);
   const visible = env.visible;
   const all = (root, selector) => Array.from(root.querySelectorAll(selector)).filter(visible);
   const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const heading = /^(you'll pay when|when you'll pay|payment threshold)$/i;
-  const dialogTitle = /^(billing date and threshold|edit payment threshold|change payment threshold)$/i;
+  const heading = /^(you'll pay when|when you'll pay|payment threshold)\s*:?$/i;
+  const dialogTitle = /^(billing date (?:and|&) threshold|(?:edit|change|manage) payment threshold|payment threshold)$/i;
+  const textSelector = 'h1,h2,h3,h4,h5,h6,[role="heading"],div,span,p,strong,label';
+  const controlSelector = 'button,[role="button"],a,[role="link"]';
+  const unrelatedHeading = /^(account spending limit|daily spending limit|payment methods|add payment method|current balance|available funds|payment activity|business info(?:rmation)?)$/i;
   function currencyCode(currency) {
     if (!/^[A-Z]{3}$/.test(currency || '')) throw new Error('Валюта кабинета не подтверждена.');
     if (Intl.supportedValuesOf && !Intl.supportedValuesOf('currency').includes(currency)) throw new Error('Неизвестная валюта кабинета: ' + currency);
@@ -250,51 +253,77 @@ function createPaymentThresholdTools(env) {
     const values = [...text.matchAll(rx)].map(m => Number((m[1] || m[2]).replace(/,/g, '')));
     return values.length && new Set(values).size === 1 ? values[0] : null;
   }
-  function buttonName(button) { return norm(button.getAttribute('aria-label') || textOf(button)); }
+  function labelledText(el) {
+    return norm((el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean).map(id => el.ownerDocument.getElementById(id)).filter(Boolean).map(textOf).join(' '));
+  }
+  function buttonName(button) { return norm(button.getAttribute('aria-label') || labelledText(button) || textOf(button) || button.getAttribute('title')); }
+  function leafMatches(root, pattern) {
+    return all(root, textSelector).filter(el => pattern.test(textOf(el)) && !all(el, textSelector).some(child => pattern.test(textOf(child))));
+  }
+  function thresholdAnchors(doc) { return leafMatches(doc, heading).filter(el => !el.closest('[role="dialog"]')); }
+  function editButtons(root) {
+    return all(root, controlSelector).filter(b => /^(edit|change|manage)( (?:payment threshold|billing date (?:and|&) threshold))?$/i.test(buttonName(b)));
+  }
+  function enabled(el) { return !el.disabled && el.getAttribute('aria-disabled') !== 'true'; }
   function section(doc, currency, needEdit) {
-    const anchors = all(doc, 'h1,h2,h3,h4,h5,h6,div,span,p').filter(el => heading.test(textOf(el)));
+    const anchors = thresholdAnchors(doc), matches = [];
     for (const anchor of anchors) {
       let root = anchor;
-      for (let i = 0; root && i < 7; i++, root = root.parentElement) {
+      for (; root && root !== doc.body && root !== doc.documentElement; root = root.parentElement) {
         const text = textOf(root);
-        // Never widen the search into an unrelated payment/spending control.
-        if (text.length > 1000 || /account spending limit|daily spending limit|payment methods|add payment method/i.test(text)) break;
-        const edits = all(root, 'button,[role="button"]').filter(b => /^(edit|change|manage)( payment threshold| billing date and threshold)?$/i.test(buttonName(b)));
+        // React wrappers are not section boundaries. Other billing headings are.
+        if (leafMatches(root, unrelatedHeading).length || anchors.some(other => other !== anchor && root.contains(other))) break;
+        const edits = editButtons(root);
         const current = money(text, currency);
-        if (needEdit ? edits.length === 1 : current !== null) return { root, edit: edits.length === 1 ? edits[0] : null, current };
+        if (needEdit ? edits.length > 0 : current !== null) {
+          if (!needEdit || edits.length === 1) matches.push({ root, edit: edits.length === 1 ? edits[0] : null, current });
+          break;
+        }
       }
     }
-    return null;
+    return matches.length === 1 ? matches[0] : null;
   }
   function getDialog(doc) {
-    const matches = all(doc, '[role="dialog"]').filter(d => dialogTitle.test(norm(d.getAttribute('aria-label'))) || all(d, 'h1,h2,h3,[role="heading"]').some(h => dialogTitle.test(textOf(h))));
+    const matches = all(doc, '[role="dialog"]').filter(d => dialogTitle.test(norm(d.getAttribute('aria-label'))) || dialogTitle.test(labelledText(d)) || all(d, 'h1,h2,h3,[role="heading"]').some(h => dialogTitle.test(textOf(h))));
     return matches.length === 1 ? matches[0] : null;
   }
   function getAmountInput(dialog) {
     const inputs = all(dialog, 'input').filter(input => {
       if (!['', 'text', 'number', 'tel'].includes(input.getAttribute('type') || '')) return false;
       const labels = Array.from(dialog.querySelectorAll('label')).filter(l => l.contains(input) || (input.id && l.getAttribute('for') === input.id));
-      const labelled = (input.getAttribute('aria-labelledby') || '').split(/\s+/).map(id => input.ownerDocument.getElementById(id)).filter(Boolean);
+      const labelled = (input.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean).map(id => input.ownerDocument.getElementById(id)).filter(Boolean);
       const names = [input.getAttribute('aria-label'), input.getAttribute('placeholder'), ...labels.map(l => l.textContent), ...labelled.map(l => l.textContent)];
       return names.some(n => /^(enter an amount|payment threshold|threshold amount)(?:\s*\([A-Z]{3}\))?$/i.test(norm(n)));
     });
     return inputs.length === 1 ? inputs[0] : null;
   }
   function failure(status, detail, desired, currency, current) { return { status, detail, desired, currency, current }; }
+  async function waitForSection(currency, desired, needEdit) {
+    try {
+      return await env.wait(() => {
+        const doc = env.document(), before = section(doc, currency, false), control = section(doc, currency, true);
+        if (needEdit ? ((before && before.current === desired) || (control && enabled(control.edit))) : before) return { before, control };
+        return null;
+      }, 25000);
+    } catch (error) {
+      if (env.stopped()) throw new Error('Остановлено.');
+      const doc = env.document(), before = section(doc, currency, false), control = section(doc, currency, true);
+      if (!needEdit) return { before, control };
+      const reason = !thresholdAnchors(doc).length ? 'Раздел You\'ll pay when не появился за 25 секунд.' : control && !enabled(control.edit) ? 'Meta показывает недоступную кнопку Edit в разделе You\'ll pay when.' : 'Раздел You\'ll pay when найден, но однозначная кнопка Edit/Change в нём не появилась за 25 секунд.';
+      throw new Error(reason + ' Открой настройки оплаты этого кабинета и проверь доступность изменения порога.');
+    }
+  }
   async function apply(accountId, requested, currency) {
     let desired, submitted = false;
     try {
       desired = amount(requested, currency);
       await env.navigate(accountId);
-      let doc = env.document();
-      const before = section(doc, currency, false);
+      const { before, control } = await waitForSection(currency, desired, true);
       if (before && before.current === desired) return { status: 'confirmed', already: true, current: desired, desired, currency };
-      const control = section(doc, currency, true);
-      if (!control || !control.edit || control.edit.disabled || control.edit.getAttribute('aria-disabled') === 'true') return failure('unavailable', 'Не найден доступный Edit в разделе You\'ll pay when. Порог не отправлен; проверь настройки оплаты вручную.', desired, currency, before && before.current);
+      if (env.stopped()) throw new Error('Остановлено.');
       control.edit.click();
       const dialog = await env.wait(() => getDialog(env.document()), 12000);
-      const input = getAmountInput(dialog);
-      if (!input) return failure('unavailable', 'В диалоге Billing date and threshold не найдено однозначное поле Enter an amount. Ничего не сохранено.', desired, currency);
+      const input = await env.wait(() => dialog.isConnected && getAmountInput(dialog), 12000);
       const currencyText = textOf(dialog) + ' ' + all(dialog, '*').filter(el => !el.children.length).map(textOf).join(' ');
       const currencyMentions = currencyText.match(/\b[A-Z]{3}\b/g) || [];
       const known = Intl.supportedValuesOf ? Intl.supportedValuesOf('currency') : ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'RUB'];
@@ -320,8 +349,7 @@ function createPaymentThresholdTools(env) {
       if (result.error) return failure('rejected', 'Meta: ' + result.error, desired, currency);
       // Reopen the account page. Neither a click nor closing a dialog is success.
       await env.navigate(accountId);
-      doc = env.document();
-      const after = section(doc, currency, false);
+      const { before: after } = await waitForSection(currency, desired, false);
       if (after && after.current === desired) return { status: 'confirmed', current: after.current, desired, currency };
       return failure('unconfirmed', 'После сохранения и обновления страницы фактический порог ' + (after ? after.current + ' ' + currency : 'не удалось прочитать') + '. Значение ' + desired + ' ' + currency + ' не подтверждено: Meta может ограничивать или повышать его постепенно.', desired, currency, after && after.current);
     } catch (error) {
@@ -533,7 +561,7 @@ idoc.write([
 '        <div><label>Cards (по строке)</label><textarea id="card-cards" placeholder="PAN-MM/YY-CVC&#10;или с галкой:&#10;PAN-CVC"></textarea></div>',
 '      </div>',
 '      <div class="muted" style="font-size:11px;margin-top:6px">Строка N в Accounts ↔ строка N в Cards. Worker откроется один раз.</div>',
-"<fieldset style=\"margin:12px 0;border:1px solid #cad5e2;border-radius:6px;padding:10px\">\n<legend><b>Порог автоматического списания · You'll pay when</b></legend>\n<label style=\"font-weight:normal\"><input type=\"checkbox\" id=\"card-threshold-enabled\" checked> Настроить порог перед привязкой карты</label>\n<div class=\"cols\"><div><label for=\"card-threshold-default\">Сумма по умолчанию для USD</label><input id=\"card-threshold-default\" type=\"text\" inputmode=\"decimal\" value=\"100\"></div><div style=\"align-self:end\"><button type=\"button\" id=\"card-threshold-50\">50 USD</button> <button type=\"button\" id=\"card-threshold-100\">100 USD</button></div></div>\n<div class=\"muted\" style=\"margin:8px 0\">Сначала укажи Account IDs, затем проверь валюты. Для других валют введи сумму отдельно в строке кабинета — конвертации нет.</div>\n<button type=\"button\" id=\"card-threshold-check\">Проверить валюты и суммы</button>\n<div id=\"card-threshold-status\" role=\"status\" style=\"margin:8px 0\">Валюты кабинетов ещё не проверены.</div>\n<div id=\"card-threshold-table\" style=\"overflow:auto\"></div>\n<label style=\"font-weight:normal\"><input type=\"checkbox\" id=\"card-threshold-continue\"> Продолжать привязку, даже если порог не подтверждён</label>\n<div class=\"muted\" style=\"margin-top:6px\">Meta может отказать, ограничить сумму или повышать порог постепенно. Это условие автоматического списания, а не строгий максимум долга или суммы платежа. Результат подтверждается чтением после сохранения. Без подтверждения пакет по умолчанию остановится до привязки карты.</div>\n</fieldset>\n",
+"<fieldset style=\"margin:12px 0;border:1px solid #cad5e2;border-radius:6px;padding:10px\">\n<legend><b>Порог автоматического списания · You'll pay when</b></legend>\n<label style=\"font-weight:normal\"><input type=\"checkbox\" id=\"card-threshold-enabled\" checked> Настроить порог перед привязкой карты</label>\n<div class=\"cols\"><div><label for=\"card-threshold-default\">Сумма по умолчанию для USD</label><input id=\"card-threshold-default\" type=\"text\" inputmode=\"decimal\" value=\"100\"></div><div style=\"align-self:end\"><button type=\"button\" id=\"card-threshold-50\">50 USD</button> <button type=\"button\" id=\"card-threshold-100\">100 USD</button></div></div>\n<div class=\"muted\" style=\"margin:8px 0\">Сначала укажи Account IDs, затем проверь валюты. Для других валют введи сумму отдельно в строке кабинета — конвертации нет.</div>\n<button type=\"button\" id=\"card-threshold-check\">Проверить валюты и суммы</button> <button type=\"button\" id=\"card-threshold-only\">Установить только пороги</button>\n<div id=\"card-threshold-status\" role=\"status\" style=\"margin:8px 0\">Валюты кабинетов ещё не проверены.</div>\n<div id=\"card-threshold-table\" style=\"overflow:auto\"></div>\n<label style=\"font-weight:normal\"><input type=\"checkbox\" id=\"card-threshold-continue\"> Продолжать привязку, даже если порог не подтверждён</label>\n<div class=\"muted\" style=\"margin-top:6px\">Meta может отказать, ограничить сумму или повышать порог постепенно. Это условие автоматического списания, а не строгий максимум долга или суммы платежа. Результат подтверждается чтением после сохранения. Без подтверждения пакет по умолчанию остановится до привязки карты.</div>\n</fieldset>\n",
 '      <button id="card-run" class="run">Run cards</button>',
 '      <button id="card-stop" class="stop" style="display:none">Stop</button>',
 '    </div>',
@@ -884,6 +912,7 @@ await sleep(200);
 try { worker.location.reload(); } catch (e2) {}
 }
 var t0 = Date.now();
+var loaded = false;
 while (Date.now() - t0 < 30000) {
 if (cardStopped) throw new Error('stopped');
 if (worker.closed) throw new Error('worker closed');
@@ -893,12 +922,15 @@ throw new Error('Cross-origin block: master=' + location.hostname + '. Откр�
 try {
 var sameDoc = (worker.__bmNav === navMarker);
 if (!sameDoc && worker.document.readyState === 'complete' &&
-worker.location.href.indexOf('billing_hub') !== -1) {
+new URL(worker.location.href).pathname.indexOf('/billing_hub/payment_settings') !== -1 &&
+(!expectedAcc || new URL(worker.location.href).searchParams.get('asset_id') === expectedAcc)) {
+loaded = true;
 break;
 }
 } catch (e) {}
 await sleep(300);
 }
+if (!loaded) throw new Error('Настройки оплаты нужного кабинета не загрузились за 30 секунд. Повтори запуск.');
 await sleep(2000);
 if (expectedAcc) {
 var actualUrl = '';
@@ -931,6 +963,17 @@ d.querySelector('input[placeholder*="Postal" i]') ||
 d.querySelector('input[aria-label*="ZIP" i]') ||
 d.querySelector('input[aria-label*="Postal" i]')
 };
+}
+function paymentError(d) {
+var alerts = d.querySelectorAll('[role="alert"]');
+for (var i = 0; i < alerts.length; i++) {
+var el = alerts[i], text = (el.textContent || '').trim();
+if (!isVisible(el) || text.length <= 4) continue;
+// Ads Manager exposes this informational notice as an alert on Billing too.
+if (/^Total results hidden\s*(?:Close\s*)?Your total results are hidden in order to improve load time\./i.test(text)) continue;
+return text;
+}
+return null;
 }
 async function attachCard(accId, pan, mmyy, cvc, name, setDefault) {
 await navigateAndWait(billingUrl(accId));
@@ -1018,9 +1061,9 @@ var successText = findByTextVisible(d, 'div,h1,h2,h3,span', 'successfully saved'
 findByTextVisible(d, 'div,h1,h2,h3,span', 'has been added') ||
 findByTextVisible(d, 'div,h1,h2,h3,span', 'Card successfully');
 if (successText) return { type: 'ok' };
-var errEl = d.querySelector('[role="alert"]');
-if (errEl && errEl.textContent && errEl.textContent.trim().length > 4) {
-return { type: 'error', text: errEl.textContent.trim() };
+var errorText = paymentError(d);
+if (errorText) {
+return { type: 'error', text: errorText };
 }
 if (!findInputs(d).pan && !findByTextVisible(d, 'button,[role="button"]', 'Next')) {
 return { type: 'ok' };
@@ -1061,7 +1104,7 @@ function cardAccountIds(){
 }
 function thresholdInvalidate(){thresholdPlan=null;$('card-threshold-table').textContent='';$('card-threshold-status').textContent='Параметры изменились. Проверь валюты и суммы снова.'}
 function thresholdSetBusy(on){
-  ['card-run','card-accs','card-cards','card-name','card-threshold-enabled','card-threshold-default','card-threshold-check','card-threshold-50','card-threshold-100','card-threshold-continue','card-currmonth','card-yearsadd','card-setdefault'].forEach(function(id){$(id).disabled=on});
+  ['card-run','card-accs','card-cards','card-name','card-threshold-enabled','card-threshold-default','card-threshold-check','card-threshold-only','card-threshold-50','card-threshold-100','card-threshold-continue','card-currmonth','card-yearsadd','card-setdefault'].forEach(function(id){$(id).disabled=on});
   $('card-threshold-table').querySelectorAll('input').forEach(function(el){el.disabled=on});
 }
 async function readAccountCurrency(id){
@@ -1101,13 +1144,13 @@ $('card-threshold-check').onclick=async function(){
     }
     if(signature!==cardAccountIds().join(','))throw new Error('Список кабинетов изменился — проверь заново.');
     thresholdPlan={signature:signature,rows:rows};thresholdRender(rows);
-    $('card-threshold-status').textContent='Проверка валют завершена. Порог ещё не изменялся. Укажи суммы и запускай Run cards.';
+    $('card-threshold-status').textContent='Проверка валют завершена. Укажи суммы: «Установить только пороги» — для уже привязанных карт; Run cards — для новых.';
   }catch(e){thresholdInvalidate();$('card-threshold-status').textContent=e.message}
   finally{thresholdSetBusy(false);rows.forEach(function(row){if(!row.currency){var tr=row.cell&&row.cell.parentNode;if(tr)tr.querySelector('input').disabled=true}})}
 };
-function thresholdRequests(ids){
-  if(!$('card-threshold-enabled').checked)return null;
-  if(!thresholdPlan||thresholdPlan.signature!==ids.join(','))throw new Error('Перед Run cards нажми «Проверить валюты и суммы».');
+function thresholdRequests(ids,onlyThresholds){
+  if(!onlyThresholds&&!$('card-threshold-enabled').checked)return null;
+  if(!thresholdPlan||thresholdPlan.signature!==ids.join(','))throw new Error('Перед запуском нажми «Проверить валюты и суммы».');
   return thresholdPlan.rows.map(function(row){if(!row.currency)throw new Error('Не подтверждена валюта кабинета '+row.id);return {id:row.id,currency:row.currency,value:thresholdTools.amount(row.requested,row.currency),row:row}});
 }
 async function applyCardThreshold(request){
@@ -1120,6 +1163,24 @@ async function applyCardThreshold(request){
   log('   Порог: '+request.row.result,result.status==='confirmed'?'ok':'err');
   return result;
 }
+$('card-threshold-only').onclick=async function(){
+  var requests;
+  try{requests=thresholdRequests(cardAccountIds(),true)}catch(e){log(e.message,'err');return}
+  cardStopped=false;thresholdSetBusy(true);$('card-stop').style.display='inline-block';
+  var ok=0,err=0;
+  log('--- Только пороги: '+requests.length+' кабинетов ---','muted');
+  try{
+    await ensureWorker();
+    for(var i=0;i<requests.length&&!cardStopped;i++){
+      log('['+(i+1)+'/'+requests.length+'] act_'+requests[i].id);
+      try{var result=await applyCardThreshold(requests[i]);if(result.status==='confirmed')ok++;else err++}
+      catch(e){err++;requests[i].row.cell.textContent=e.message;log('   Порог: '+e.message,'err')}
+    }
+    $('card-threshold-status').textContent='Пороги: подтверждено '+ok+', не подтверждено '+err+(cardStopped?' (остановлено)':'')+'. Карты не привязывались.';
+    log($('card-threshold-status').textContent,'muted');
+  }catch(e){log(e.message,'err')}
+  finally{thresholdSetBusy(false);$('card-stop').style.display='none'}
+};
 $('card-stop').onclick = function () {
 cardStopped = true;
 $('card-stop').style.display = 'none';
