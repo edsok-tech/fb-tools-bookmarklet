@@ -27,14 +27,20 @@ test('empty input never means delete all catalogs',()=>assert.throws(()=>guard.p
 
 // Synthetic UI contract based on the user's dialog description, NOT a live Meta capture.
 function fixture(options={}){
-  let doc,navigations=0,edits=0,saves=0,inputValue='',wrongSaves=0;
+  let doc,navigations=0,edits=0,saves=0,inputValue='',wrongSaves=0,pendingPage=null;
   const currency=options.currency||'USD';
   const visible=el=>el.isConnected&&!el.hidden&&!el.closest('[hidden]');
   function makePage(current){
     const text=options.unreadable?'amount unavailable':current+' '+currency;
     const {document}=parseHTML('<html><body><section><h3>You\'ll pay when</h3><p>Your balance reaches '+text+'</p>'+(options.noEdit?'':'<button id="edit" aria-label="Edit">✎</button>')+'</section><section><h3>Account spending limit</h3><input value="500"><button id="wrong">Save</button></section></body></html>');
+    if(options.wrapped){
+      const h=document.querySelector('h3');h.outerHTML='<div>'.repeat(12)+'<span>You’ll pay when</span>'+'</div>'.repeat(12);
+      const note=document.createElement('p');note.textContent='Learn about payment methods. '.repeat(45);document.querySelector('section').appendChild(note);
+    }
     document.querySelector('#wrong').onclick=()=>{wrongSaves++};
     const edit=document.querySelector('#edit');
+    if(edit&&options.labelledEdit){edit.removeAttribute('aria-label');edit.setAttribute('aria-labelledby','edit-caption');const label=document.createElement('span');label.id='edit-caption';label.textContent='Edit';document.querySelector('section').appendChild(label)}
+    if(edit&&options.disabledEdit)edit.setAttribute('aria-disabled','true');
     if(edit)edit.onclick=()=>{
       edits++;
       const modal=document.createElement('div');modal.setAttribute('role','dialog');
@@ -50,14 +56,14 @@ function fixture(options={}){
   const tools=createPaymentThresholdTools({
     visible,document:()=>doc,stopped:()=>!!options.stopped,
     sleep:async()=>{},setInput:(input,value)=>{input.value=value},
-    navigate:async()=>{navigations++;doc=makePage(navigations===1?(options.current??2):(options.persisted??100))},
-    wait:async fn=>{const result=fn();if(!result)throw new Error('UI contract not matched');return result}
+    navigate:async()=>{navigations++;const page=makePage(navigations===1?(options.current??2):(options.persisted??100));if(options.delayed){doc=parseHTML('<html><body><div>Loading…</div></body></html>').document;pendingPage=page}else doc=page},
+    wait:async fn=>{for(let i=0;i<4;i++){const result=fn();if(result)return result;if(pendingPage&&i===1){doc=pendingPage;pendingPage=null}}throw new Error('UI contract not matched')}
   });
   return {tools,state:()=>({navigations,edits,saves,inputValue,wrongSaves})};
 }
 test('USD 100 is confirmed only after save and fresh readback; spend cap untouched',async()=>{
   const f=fixture(),r=await f.tools.apply('123456','100','USD');
-  assert.equal(r.status,'confirmed');assert.equal(r.current,100);
+  assert.equal(r.status,'confirmed',r.detail);assert.equal(r.current,100);
   assert.deepEqual(f.state(),{navigations:2,edits:1,saves:1,inputValue:'100',wrongSaves:0});
 });
 test('existing desired threshold requires no mutation',async()=>{
@@ -98,4 +104,30 @@ test('money parsing rejects mixed currencies and multiple balances',()=>{
   assert.equal(t.money('€75.50','EUR'),75.5);
   assert.equal(t.money('USD 100 EUR 100','USD'),null);
   assert.equal(t.money('Current balance $25; threshold $100','USD'),null);
+});
+test('React nesting and long explanatory text do not hide the threshold Edit',async()=>{
+  const f=fixture({wrapped:true,labelledEdit:true}),r=await f.tools.apply('123456',100,'USD');
+  assert.equal(r.status,'confirmed');assert.equal(f.state().edits,1);assert.equal(f.state().wrongSaves,0);
+});
+test('waits for SPA billing content both before Edit and after saving',async()=>{
+  const f=fixture({delayed:true}),r=await f.tools.apply('123456',100,'USD');
+  assert.equal(r.status,'confirmed');assert.equal(f.state().navigations,2);assert.equal(f.state().saves,1);
+});
+test('disabled Edit is reported separately without clicking or saving',async()=>{
+  const f=fixture({disabledEdit:true}),r=await f.tools.apply('123456',100,'USD');
+  assert.equal(r.status,'unavailable');assert.match(r.detail,/недоступную кнопку Edit/);assert.equal(f.state().edits,0);
+});
+test('never borrows an Edit from another billing section',()=>{
+  const {document}=parseHTML('<html><body><main><section><h3>You\'ll pay when</h3><p>$2</p></section><section><h3>Payment methods</h3><button>Edit</button></section></main></body></html>');
+  assert.equal(fixture().tools.section(document,'USD',true),null);
+});
+test('two Edit controls and two threshold sections are ambiguous',()=>{
+  for(const html of [
+    '<section><h3>You\'ll pay when</h3><p>$2</p><button>Edit</button><button>Edit</button></section>',
+    '<section><h3>You\'ll pay when</h3><p>$2</p><button>Edit</button></section>'.repeat(2)
+  ]){const {document}=parseHTML('<html><body>'+html+'</body></html>');assert.equal(fixture().tools.section(document,'USD',true),null)}
+});
+test('recognizes a dialog with an aria-labelledby title',()=>{
+  const {document}=parseHTML('<html><body><div role="dialog" aria-labelledby="title"><div id="title">Billing date &amp; threshold</div><label for="x">Enter an amount</label><input id="x"></div></body></html>');
+  const tools=fixture().tools,dialog=tools.getDialog(document);assert.ok(dialog);assert.equal(tools.getAmountInput(dialog).id,'x');
 });

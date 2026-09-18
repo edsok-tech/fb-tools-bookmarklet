@@ -77,6 +77,7 @@ test('Billing initializes threshold controls with 100 USD and no write requests'
   assert.ok(d.getElementById('card-threshold-enabled').hasAttribute('checked'));
   assert.equal(d.getElementById('card-threshold-continue').hasAttribute('checked'),false);
   assert.equal(typeof d.getElementById('card-threshold-check').onclick,'function');
+  assert.equal(typeof d.getElementById('card-threshold-only').onclick,'function');
   assert.equal(a.calls.length,0);
 });
 test('editing deletion input disables the checked plan',async()=>{
@@ -107,4 +108,39 @@ test('DISABLED status is checked again immediately before each account removal',
   a.accounts[0].status='ACTIVE';await a.remove();
   assert.equal(a.calls.filter(c=>c.name==='BizKitSettingsRemoveAdAccountMutation').length,1);
   assert.match(a.q('#d_log').textContent,/400001: Текущий статус ACTIVE/);
+});
+test('Ads Manager hidden-results notice is informational, while real card alerts still fail',()=>{
+  const fn=source.slice(source.indexOf('function paymentError(d)'),source.indexOf('async function attachCard('));
+  const read=vm.runInNewContext('('+fn.trim()+')',{isVisible:el=>!el.hidden});
+  const {document}=parseHTML('<html><body><div role="alert">Total results hiddenCloseYour total results are hidden in order to improve load time. To see them, click View results in the Results summary row.</div></body></html>');
+  assert.equal(read(document),null);
+  const error=document.createElement('div');error.setAttribute('role','alert');error.textContent='Your card was declined';document.body.appendChild(error);
+  assert.equal(read(document),'Your card was declined');
+});
+test('threshold-only action runs checked accounts without card details or card attachment',async()=>{
+  const a=await app();a.q('#fb_tabB').onclick();const d=a.billing();
+  const calls=[],rows=[{id:'400001',currency:'USD',requested:'100',cell:d.createElement('td')},{id:'400002',currency:'USD',requested:'50',cell:d.createElement('td')}];
+  const start=source.indexOf("$('card-threshold-only').onclick="),end=source.indexOf("$('card-stop').onclick",start);
+  vm.runInNewContext(source.slice(start,end),{
+    $:id=>d.getElementById(id),cardAccountIds:()=>rows.map(r=>r.id),thresholdRequests:(ids,only)=>{assert.equal(only,true);return rows},
+    thresholdSetBusy:on=>calls.push(['busy',on]),ensureWorker:async()=>calls.push(['worker']),
+    applyCardThreshold:async row=>{calls.push(['threshold',row.id]);return {status:row.id==='400001'?'confirmed':'unavailable'}},log:()=>{}
+  });
+  assert.equal(d.getElementById('card-cards').value,'');
+  await d.getElementById('card-threshold-only').onclick();
+  assert.deepEqual(calls,[['busy',true],['worker'],['threshold','400001'],['threshold','400002'],['busy',false]]);
+  assert.match(d.getElementById('card-threshold-status').textContent,/подтверждено 1, не подтверждено 1/);
+});
+test('navigation requires a fresh billing document for the exact requested account',async()=>{
+  const fn=source.slice(source.indexOf('async function navigateAndWait(url)'),source.indexOf('function findInputs(d)'));
+  const target='https://adsmanager.facebook.com/adsmanager/billing_hub/payment_settings/?asset_id=400001';
+  for(const mode of ['ready','wrong-page','wrong-account','stale-document']){
+    let clock=0;
+    const worker={closed:false,document:{readyState:'complete'},location:{href:target,replace(){
+      if(mode!=='stale-document')delete worker.__bmNav;
+      this.href=mode==='wrong-page'?target.replace('billing_hub/payment_settings','manage/campaigns'):mode==='wrong-account'?target.replace('400001','4000010'):target;
+    }}};
+    const navigate=vm.runInNewContext('('+fn.trim()+')',{worker,cardStopped:false,Date:{now:()=>clock},Math,URL,isCrossOrigin:()=>false,sleep:async ms=>{clock+=ms}});
+    if(mode==='ready')await navigate(target);else await assert.rejects(navigate(target),/не загрузились/);
+  }
 });
