@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 const target = new URL('../index.html', import.meta.url);
 let html = readFileSync(target, 'utf8');
-for (const name of ['catalog-guard', 'payment-threshold']) {
+for (const name of ['catalog-guard', 'payment-threshold', 'leadingcards-date-actions']) {
   const begin = '// BEGIN ' + name;
   const end = '// END ' + name;
   const source = readFileSync(new URL('../src/' + name + '.js', import.meta.url), 'utf8').replace(/^export /gm, '').trim();
